@@ -311,19 +311,29 @@ def get_environment(latitude, longitude, forecast_date):
 
     # ---------------------------------
     # 16–44 days, or forecast API failed: typical historical conditions
+    # Use ±7 days around the date across 5 years, not a single
+    # calendar day. One socked-in 30 Oct would otherwise look like
+    # "October is impossible" even though nights are already dark.
     # ---------------------------------
     if not used_forecast:
 
         historical_rows = []
+        window_days = 7
 
         for years_back in range(1, 6):
 
-            historical_date = forecast_date.replace(
-                year=forecast_date.year - years_back
-            )
+            try:
+                historical_date = forecast_date.replace(
+                    year=forecast_date.year - years_back
+                )
+            except ValueError:
+                historical_date = forecast_date.replace(
+                    year=forecast_date.year - years_back,
+                    day=28
+                )
 
-            start_date = historical_date.isoformat()
-            end_date = (historical_date + timedelta(days=1)).isoformat()
+            start_date = (historical_date - timedelta(days=window_days)).isoformat()
+            end_date = (historical_date + timedelta(days=window_days + 1)).isoformat()
 
             url = (
                 "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -352,15 +362,7 @@ def get_environment(latitude, longitude, forecast_date):
             })
 
             df = df[
-                (
-                    (df["time"].dt.date == historical_date) &
-                    (df["time"].dt.hour >= 21)
-                )
-                |
-                (
-                    (df["time"].dt.date == historical_date + timedelta(days=1)) &
-                    (df["time"].dt.hour <= 3)
-                )
+                (df["time"].dt.hour >= 21) | (df["time"].dt.hour <= 3)
             ].copy()
 
             if not df.empty:
@@ -979,6 +981,42 @@ def cloud_comment(cloud_cover):
 # Aurora Observation Probability
 # -----------------------------------------------------
 
+def aurora_potential_factor(ap, latitude):
+    """Quiet nights still favour the auroral zone (~65N+).
+
+    Stronger Ap mainly helps farther south. Multiplying a separate
+    Low-Ap factor (0.15) by latitude used to cap Tromsø at 15% even
+    with dark, clear skies — so late October looked as 'bad' as summer.
+    """
+    abs_lat = abs(latitude)
+
+    if ap >= 30:
+        bands = (
+            (65, 1.00), (60, 0.90), (55, 0.70),
+            (50, 0.45), (45, 0.22), (0, 0.08),
+        )
+    elif ap >= 15:
+        bands = (
+            (65, 0.95), (60, 0.80), (55, 0.50),
+            (50, 0.25), (45, 0.10), (0, 0.03),
+        )
+    elif ap >= 8:
+        bands = (
+            (65, 0.85), (60, 0.62), (55, 0.32),
+            (50, 0.12), (45, 0.05), (0, 0.02),
+        )
+    else:
+        bands = (
+            (65, 0.70), (60, 0.40), (55, 0.15),
+            (50, 0.05), (45, 0.02), (0, 0.01),
+        )
+
+    for min_lat, factor in bands:
+        if abs_lat >= min_lat:
+            return factor
+    return 0.01
+
+
 def estimate_aurora_probability(
     forecast,
     environment,
@@ -990,41 +1028,16 @@ def estimate_aurora_probability(
     darkness = classify_darkness(sun_data, latitude, forecast_date)
 
     # -----------------------------
-    # 1. Geomagnetic potential
+    # 1. Aurora potential (Ap × latitude)
     # -----------------------------
 
-    if forecast["ap_today"] >= 30:
-        ap_factor = 1.0
-    elif forecast["ap_today"] >= 15:
-        ap_factor = 0.70
-    elif forecast["ap_today"] >= 8:
-        ap_factor = 0.40
-    else:
-        ap_factor = 0.15
-
-    geomagnetic_factor = ap_factor
+    aurora_potential = aurora_potential_factor(
+        forecast["ap_today"],
+        latitude
+    )
 
     # -----------------------------
-    # 2. Latitude factor
-    # -----------------------------
-
-    abs_lat = abs(latitude)
-
-    if abs_lat >= 65:
-        latitude_factor = 1.0
-    elif abs_lat >= 60:
-        latitude_factor = 0.75
-    elif abs_lat >= 55:
-        latitude_factor = 0.45
-    elif abs_lat >= 50:
-        latitude_factor = 0.20
-    elif abs_lat >= 45:
-        latitude_factor = 0.08
-    else:
-        latitude_factor = 0.02
-
-    # -----------------------------
-    # 3. Observation conditions
+    # 2. Observation conditions
     # -----------------------------
 
     if darkness == "Excellent":
@@ -1045,7 +1058,7 @@ def estimate_aurora_probability(
         )
 
     if pd.isna(environment["visibility"]):
-        visibility_factor = 0.5
+        visibility_factor = 1.0
 
     else:
         visibility_km = environment["visibility"] / 1000
@@ -1062,11 +1075,6 @@ def estimate_aurora_probability(
     # -----------------------------
     # Final estimate
     # -----------------------------
-
-    aurora_potential = (
-        geomagnetic_factor *
-        latitude_factor
-    )
 
     observation_conditions = (
         darkness_factor *
@@ -2150,29 +2158,32 @@ if result is not None:
         "sky darkness, cloud cover and visibility."
     )
 
-    if result["probability"] < 20:
+    st.metric(
+        label="Estimated Observation Chance",
+        value=f"{result['probability']}%"
+    )
+
+    if result["best_time"] == SKY_TOO_BRIGHT:
+        st.warning(
+            "No useful viewing time on this date because of the current season: "
+            "at this latitude the sky does not get dark enough "
+            "(midnight sun or white nights). "
+            "Aurora would be washed out even with clear skies."
+        )
+    elif result["best_time"] != "Weather estimate unavailable":
+        st.metric(
+            label="Best Viewing Time",
+            value=result["best_time"]
+        )
+
+    if (
+        result["probability"] < 20
+        and result["best_time"] != SKY_TOO_BRIGHT
+    ):
         st.warning(
             "The chances of observing the Northern Lights are less than 20% "
             "for this date and location."
         )
-    else:
-        st.metric(
-            label="Estimated Observation Chance",
-            value=f"{result['probability']}%"
-        )
-
-        if result["best_time"] == SKY_TOO_BRIGHT:
-            st.warning(
-                "No useful viewing time on this date because of the current season: "
-                "at this latitude the sky does not get dark enough "
-                "(midnight sun or white nights). "
-                "Aurora would be washed out even with clear skies."
-            )
-        elif result["best_time"] != "Weather estimate unavailable":
-            st.metric(
-                label="Best Viewing Time",
-                value=result["best_time"]
-            )
 
     st.markdown("---")
 
