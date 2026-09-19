@@ -1105,7 +1105,11 @@ def estimate_aurora_probability(
     if ignore_weather:
         cloud_factor = 1.0
         visibility_factor = 1.0
-        best_time = get_seasonal_viewing_time(latitude, forecast_date)
+        seasonal_time = get_seasonal_viewing_time(latitude, forecast_date)
+        if seasonal_time == SKY_TOO_BRIGHT:
+            best_time = SKY_TOO_BRIGHT
+        else:
+            best_time = "15-day limit"
         sky_clarity = "15-day limit"
     else:
         if pd.isna(environment["cloud_cover"]):
@@ -2238,7 +2242,7 @@ if result is not None:
             "(midnight sun or white nights). "
             "Aurora would be washed out even with clear skies."
         )
-    elif result.get("ignore_weather"):
+    elif result.get("ignore_weather") or result["best_time"] == "15-day limit":
         st.metric(
             label="Best Viewing Time",
             value="15-day limit"
