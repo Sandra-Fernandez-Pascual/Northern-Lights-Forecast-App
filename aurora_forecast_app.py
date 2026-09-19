@@ -2221,8 +2221,7 @@ if result is not None:
     if result.get("ignore_weather"):
         st.caption(
             "Observation chance from forecast space weather (Ap), location and "
-            "sky darkness. Cloud cover and visibility are not included more "
-            "than 15 days ahead, because a reliable weather forecast is not available."
+            "sky darkness."
         )
     else:
         st.caption(
@@ -2243,15 +2242,9 @@ if result is not None:
             "Aurora would be washed out even with clear skies."
         )
     elif result.get("ignore_weather") or result["best_time"] == "15-day limit":
-        st.metric(
-            label="Best Viewing Time",
-            value="15-day limit"
-        )
         st.caption(
-            "A reliable viewing-time forecast is only available up to 15 days "
-            "ahead. For later dates this estimate does not suggest a specific "
-            "hour, so as not to deliver a mistaken prediction. Check again "
-            "when your date is within 15 days."
+            "Best viewing times, weather and clouds are only available "
+            "within 15 days."
         )
     elif result["best_time"] != "Weather estimate unavailable":
         st.metric(
@@ -2272,10 +2265,7 @@ if result is not None:
 
     st.subheader("Forecast conditions")
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.markdown(f"""
+    darkness_card = f"""
         <div class="condition-card">
             <div class="condition-title">🌑 SKY DARKNESS</div>
             <div class="condition-value">{result['darkness']}</div>
@@ -2283,65 +2273,9 @@ if result is not None:
                 {result['darkness_caption']}
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """
 
-    weather_limit_text = (
-        "A reliable weather forecast is only available up to 15 days ahead. "
-        "For later dates this estimate does not use cloud cover or visibility, "
-        "so as not to deliver a mistaken prediction. Check again when your "
-        "date is within 15 days."
-    )
-
-    if result.get("ignore_weather"):
-        cloud_title = "☁️ WEATHER"
-        cloud_value = "15-day limit"
-        cloud_text = weather_limit_text
-        clarity_title = "👁 SKY CLARITY"
-        clarity_value = "15-day limit"
-        clarity_text = weather_limit_text
-    else:
-        cloud_title = "☁️ CLOUD COVER"
-        cloud_value = (
-            "—"
-            if pd.isna(environment["cloud_cover"])
-            else f"{environment['cloud_cover']:.0f}%"
-        )
-        cloud_text = cloud_comment(environment["cloud_cover"])
-        clarity_title = "👁 SKY CLARITY"
-        clarity_value = result["sky_clarity"]
-        clarity_text = (
-            f"Meteorological visibility: {environment['visibility']/1000:.1f} km."
-            if not pd.isna(environment["visibility"])
-            else "Visibility in km is unavailable for this date."
-        )
-
-    with col2:
-        st.markdown(f"""
-        <div class="condition-card">
-            <div class="condition-title">{cloud_title}</div>
-            <div class="condition-value">{cloud_value}</div>
-            <div class="condition-text">
-                {cloud_text}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-
-        st.markdown(f"""
-        <div class="condition-card">
-            <div class="condition-title">{clarity_title}</div>
-            <div class="condition-value">{clarity_value}</div>
-            <div class="condition-text">
-                {clarity_text}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    col4, col5 = st.columns(2)
-
-    with col4:
-        st.markdown(f"""
+    geo_card = f"""
         <div class="condition-card">
             <div class="condition-title">🧲 GEOMAGNETIC ACTIVITY</div>
             <div class="condition-value">{result['geomagnetic_activity']}</div>
@@ -2349,10 +2283,9 @@ if result is not None:
                 Measures the expected disturbance of Earth's magnetic field.
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """
 
-    with col5:
-        st.markdown(f"""
+    solar_card = f"""
         <div class="condition-card">
             <div class="condition-title">☀️ SOLAR ACTIVITY</div>
             <div class="condition-value">{result['solar_activity']}</div>
@@ -2360,7 +2293,60 @@ if result is not None:
                 Represents the overall level of solar activity.
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """
+
+    if result.get("ignore_weather"):
+        dark_col, geo_col, solar_col = st.columns(3)
+        with dark_col:
+            st.markdown(darkness_card, unsafe_allow_html=True)
+        with geo_col:
+            st.markdown(geo_card, unsafe_allow_html=True)
+        with solar_col:
+            st.markdown(solar_card, unsafe_allow_html=True)
+    else:
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown(darkness_card, unsafe_allow_html=True)
+
+        cloud_value = (
+            "—"
+            if pd.isna(environment["cloud_cover"])
+            else f"{environment['cloud_cover']:.0f}%"
+        )
+        clarity_text = (
+            f"Meteorological visibility: {environment['visibility']/1000:.1f} km."
+            if not pd.isna(environment["visibility"])
+            else "Visibility in km is unavailable for this date."
+        )
+
+        with col2:
+            st.markdown(f"""
+            <div class="condition-card">
+                <div class="condition-title">☁️ CLOUD COVER</div>
+                <div class="condition-value">{cloud_value}</div>
+                <div class="condition-text">
+                    {cloud_comment(environment["cloud_cover"])}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col3:
+            st.markdown(f"""
+            <div class="condition-card">
+                <div class="condition-title">👁 SKY CLARITY</div>
+                <div class="condition-value">{result['sky_clarity']}</div>
+                <div class="condition-text">
+                    {clarity_text}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        col4, col5 = st.columns(2)
+        with col4:
+            st.markdown(geo_card, unsafe_allow_html=True)
+        with col5:
+            st.markdown(solar_card, unsafe_allow_html=True)
 
     st.markdown("---")
 
