@@ -245,6 +245,20 @@ def get_environment(latitude, longitude, forecast_date):
     last_forecast_day = date.today() + timedelta(days=15)
     used_forecast = False
 
+    # Beyond 15 days there is no reliable weather forecast.
+    # Do not use historical clouds in the score; the UI explains the limit.
+    if days_ahead > 15:
+        return {
+            "cloud_cover": np.nan,
+            "visibility": np.nan,
+            "night_weather": pd.DataFrame({
+                "time": pd.Series(dtype="datetime64[ns]"),
+                "cloud_cover": pd.Series(dtype="float64"),
+                "visibility": pd.Series(dtype="float64"),
+            }),
+            "weather_source": "historical"
+        }
+
     # ---------------------------------
     # 0–15 days: real weather forecast
     # Open-Meteo only serves through today+15. Asking for the next
@@ -310,10 +324,7 @@ def get_environment(latitude, longitude, forecast_date):
             used_forecast = True
 
     # ---------------------------------
-    # 16–44 days, or forecast API failed: typical historical conditions
-    # Use ±7 days around the date across 5 years, not a single
-    # calendar day. One socked-in 30 Oct would otherwise look like
-    # "October is impossible" even though nights are already dark.
+    # 0–15 days if the forecast API failed: typical historical conditions
     # ---------------------------------
     if not used_forecast:
 
@@ -885,6 +896,34 @@ def get_best_viewing_time(environment, latitude):
         f"{end_hour.strftime('%H:%M')}"
     )
 
+
+def get_seasonal_viewing_time(latitude, forecast_date):
+    """Night window from solar geometry when weather is not used."""
+    dark_hours = []
+    for hour in range(24):
+        moment = datetime.combine(
+            forecast_date,
+            datetime.min.time()
+        ).replace(hour=hour)
+        if _sun_elevation_local_deg(latitude, moment) <= -12:
+            dark_hours.append(hour)
+
+    if not dark_hours:
+        return SKY_TOO_BRIGHT
+
+    hour_set = set(dark_hours)
+    if len(hour_set) == 24:
+        return "00:00 - 24:00"
+
+    if 0 in hour_set and 23 in hour_set:
+        evening = min(hour for hour in hour_set if hour >= 12)
+        morning = max(hour for hour in hour_set if hour < 12)
+        return f"{evening:02d}:00 - {morning + 1:02d}:00"
+
+    start = min(dark_hours)
+    end = max(dark_hours) + 1
+    return f"{start:02d}:00 - {end:02d}:00"
+
 # -----------------------------------------------------
 # Geomagnetic Activity
 # -----------------------------------------------------
@@ -1049,28 +1088,40 @@ def estimate_aurora_probability(
     else:
         darkness_factor = 0.1
 
-    if pd.isna(environment["cloud_cover"]):
-        cloud_factor = 0.5
-    else:
-        cloud_factor = max(
-            0.05,
-            1 - environment["cloud_cover"] / 100
-        )
+    ignore_weather = (forecast_date - date.today()).days > 15
 
-    if pd.isna(environment["visibility"]):
+    if ignore_weather:
+        cloud_factor = 1.0
         visibility_factor = 1.0
-
+        best_time = get_seasonal_viewing_time(latitude, forecast_date)
+        sky_clarity = "15-day limit"
     else:
-        visibility_km = environment["visibility"] / 1000
-
-        if visibility_km >= 20:
-            visibility_factor = 1.0
-        elif visibility_km >= 10:
-            visibility_factor = 0.8
-        elif visibility_km >= 5:
-            visibility_factor = 0.5
+        if pd.isna(environment["cloud_cover"]):
+            cloud_factor = 0.5
         else:
-            visibility_factor = 0.25
+            cloud_factor = max(
+                0.05,
+                1 - environment["cloud_cover"] / 100
+            )
+
+        if pd.isna(environment["visibility"]):
+            visibility_factor = 1.0
+        else:
+            visibility_km = environment["visibility"] / 1000
+            if visibility_km >= 20:
+                visibility_factor = 1.0
+            elif visibility_km >= 10:
+                visibility_factor = 0.8
+            elif visibility_km >= 5:
+                visibility_factor = 0.5
+            else:
+                visibility_factor = 0.25
+
+        best_time = get_best_viewing_time(environment, latitude)
+        sky_clarity = classify_visibility(
+            environment["visibility"],
+            environment["cloud_cover"]
+        )
 
     # -----------------------------
     # Final estimate
@@ -1094,17 +1145,15 @@ def estimate_aurora_probability(
         "probability": probability,
         "darkness": darkness,
         "darkness_caption": describe_darkness(latitude, forecast_date),
-        "best_time": get_best_viewing_time(environment, latitude),
+        "best_time": best_time,
+        "ignore_weather": ignore_weather,
         "geomagnetic_activity": classify_geomagnetic_activity(
             forecast["ap_today"]
         ),
         "solar_activity": classify_solar_activity(
             forecast["f107_today"]
         ),
-        "sky_clarity": classify_visibility(
-            environment["visibility"],
-            environment["cloud_cover"]
-        )
+        "sky_clarity": sky_clarity
     }
 
 # -----------------------------
@@ -2153,10 +2202,17 @@ if result is not None:
     )
 
     st.subheader("Estimated chance of observing the Northern Lights")
-    st.caption(
-        "Observation chance from forecast space weather (Ap), location, "
-        "sky darkness, cloud cover and visibility."
-    )
+    if result.get("ignore_weather"):
+        st.caption(
+            "Observation chance from forecast space weather (Ap), location and "
+            "sky darkness. Cloud cover and visibility are not included more "
+            "than 15 days ahead, because a reliable weather forecast is not available."
+        )
+    else:
+        st.caption(
+            "Observation chance from forecast space weather (Ap), location, "
+            "sky darkness, cloud cover and visibility."
+        )
 
     st.metric(
         label="Estimated Observation Chance",
@@ -2202,17 +2258,35 @@ if result is not None:
         </div>
         """, unsafe_allow_html=True)
 
-    cloud_title = (
-        "☁️ CLOUD COVER"
-        if environment["weather_source"] == "forecast"
-        else "☁️ TYPICAL CLOUD COVER"
+    weather_limit_text = (
+        "A reliable weather forecast is only available up to 15 days ahead. "
+        "For later dates this estimate does not use cloud cover or visibility, "
+        "so as not to deliver a mistaken prediction. Check again when your "
+        "date is within 15 days."
     )
 
-    cloud_value = (
-        "—"
-        if pd.isna(environment["cloud_cover"])
-        else f"{environment['cloud_cover']:.0f}%"
-    )
+    if result.get("ignore_weather"):
+        cloud_title = "☁️ WEATHER"
+        cloud_value = "15-day limit"
+        cloud_text = weather_limit_text
+        clarity_title = "👁 SKY CLARITY"
+        clarity_value = "15-day limit"
+        clarity_text = weather_limit_text
+    else:
+        cloud_title = "☁️ CLOUD COVER"
+        cloud_value = (
+            "—"
+            if pd.isna(environment["cloud_cover"])
+            else f"{environment['cloud_cover']:.0f}%"
+        )
+        cloud_text = cloud_comment(environment["cloud_cover"])
+        clarity_title = "👁 SKY CLARITY"
+        clarity_value = result["sky_clarity"]
+        clarity_text = (
+            f"Meteorological visibility: {environment['visibility']/1000:.1f} km."
+            if not pd.isna(environment["visibility"])
+            else "Visibility in km is unavailable for this date."
+        )
 
     with col2:
         st.markdown(f"""
@@ -2220,29 +2294,17 @@ if result is not None:
             <div class="condition-title">{cloud_title}</div>
             <div class="condition-value">{cloud_value}</div>
             <div class="condition-text">
-                {cloud_comment(environment["cloud_cover"])}
+                {cloud_text}
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-    clarity_text = (
-        f"Meteorological visibility: {environment['visibility']/1000:.1f} km."
-        if not pd.isna(environment["visibility"])
-        else "Visibility in km is unavailable for this date."
-    )
-
     with col3:
-
-        clarity_title = (
-            "👁 SKY CLARITY"
-            if environment["weather_source"] == "forecast"
-            else "👁 TYPICAL SKY CLARITY"
-        )
 
         st.markdown(f"""
         <div class="condition-card">
             <div class="condition-title">{clarity_title}</div>
-            <div class="condition-value">{result['sky_clarity']}</div>
+            <div class="condition-value">{clarity_value}</div>
             <div class="condition-text">
                 {clarity_text}
             </div>
