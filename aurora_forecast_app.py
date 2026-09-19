@@ -898,31 +898,43 @@ def get_best_viewing_time(environment, latitude):
 
 
 def get_seasonal_viewing_time(latitude, forecast_date):
-    """Night window from solar geometry when weather is not used."""
-    dark_hours = []
+    """Best 4-hour window from solar geometry when weather is not used."""
+    window_hours = 4
+    elevations = []
     for hour in range(24):
         moment = datetime.combine(
             forecast_date,
             datetime.min.time()
         ).replace(hour=hour)
-        if _sun_elevation_local_deg(latitude, moment) <= -12:
-            dark_hours.append(hour)
+        elevations.append(_sun_elevation_local_deg(latitude, moment))
 
-    if not dark_hours:
+    if all(el > -12 for el in elevations):
         return SKY_TOO_BRIGHT
 
-    hour_set = set(dark_hours)
-    if len(hour_set) == 24:
-        return "00:00 - 24:00"
+    # Repeat the day so a window can wrap past midnight.
+    extended = elevations + elevations
+    best_start = None
+    best_mean = 1e9
 
-    if 0 in hour_set and 23 in hour_set:
-        evening = min(hour for hour in hour_set if hour >= 12)
-        morning = max(hour for hour in hour_set if hour < 12)
-        return f"{evening:02d}:00 - {morning + 1:02d}:00"
+    for start in range(24):
+        window = extended[start:start + window_hours]
+        if any(el > -12 for el in window):
+            continue
+        mean_el = sum(window) / window_hours
+        if mean_el < best_mean:
+            best_mean = mean_el
+            best_start = start
 
-    start = min(dark_hours)
-    end = max(dark_hours) + 1
-    return f"{start:02d}:00 - {end:02d}:00"
+    if best_start is None:
+        dark_hours = [
+            hour for hour, el in enumerate(elevations) if el <= -12
+        ]
+        start = dark_hours[0]
+        end = (dark_hours[-1] + 1) % 24
+        return f"{start:02d}:00 - {end:02d}:00"
+
+    end = (best_start + window_hours) % 24
+    return f"{best_start:02d}:00 - {end:02d}:00"
 
 # -----------------------------------------------------
 # Geomagnetic Activity
@@ -2225,6 +2237,17 @@ if result is not None:
             "at this latitude the sky does not get dark enough "
             "(midnight sun or white nights). "
             "Aurora would be washed out even with clear skies."
+        )
+    elif result.get("ignore_weather"):
+        st.metric(
+            label="Best Viewing Time",
+            value="15-day limit"
+        )
+        st.caption(
+            "A reliable viewing-time forecast is only available up to 15 days "
+            "ahead. For later dates this estimate does not suggest a specific "
+            "hour, so as not to deliver a mistaken prediction. Check again "
+            "when your date is within 15 days."
         )
     elif result["best_time"] != "Weather estimate unavailable":
         st.metric(
